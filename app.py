@@ -1,72 +1,77 @@
 import os
 import time
-import requests
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import requests
+import pandas as pd
+import yfinance as yf
+from flask import Flask
 
-# 1. 🌐 سيرفر ويب مدمج لإرضاء منصة Render ومنع علامة الـ X الحمراء
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Trading Bot is Active and Live!")
+# إنشاء خادم ويب وهمي لإرضاء منصة Render المجانية
+app = Flask('')
 
-def run_render_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    server.serve_forever()
+@app.route('/')
+def home():
+    return "البوت يعمل الآن بنجاح ومستيقظ!"
 
-threading.Thread(target=run_render_server, daemon=True).start()
+def run_web_server():
+    # تشغيل الخادم على المنفذ المخصص من Render
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
-# 2. ⚙️ جلب متغيرات البيئة من لوحة تحكم Render
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+# إعدادات البوت والقناة من متغيرات البيئة السرية في Render
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+ASSETS = {
+    "GC=F": "الذهب (Gold)",
+    "EURUSD=X": "اليورو مقابل الدولار (EUR/USD)",
+    "GBPUSD=X": "الباوند مقابل الدولار (GBP/USD)",
+    "USDJPY=X": "الدولار مقابل الين (USD/JPY)"
+}
 
 def send_telegram_message(message):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("تنبيه: التوكن أو الآيدي غير متوفرين في الإعدادات!")
-        return
-    
-    # صياغة الرابط البرمجي الصحيح 100% لمنع الالتصاق والخطأ
-    url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://telegram.org{TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        response = requests.post(url, json=payload)
-        print(f"Telegram response: {response.status_code}")
-    except Exception as e:
-        print(f"Error sending message: {e}")
+    try: requests.post(url, json=payload)
+    except Exception as e: print(f"خطأ إرسال: {e}")
 
-# 3. 📊 رادار الفحص اللحظي فائق الحساسية للأسعار
-def trading_strategy_loop():
-    # رسالة انطلاق ترحيبية فورية تصل لهاتفك بمجرد تشغيل السيرفر
-    send_telegram_message("🔔 **تم تشغيل رادار الفحص اللحظي بنجاح!**\nبدأ البوت بمراقبة الأسعار الحية وضخ الصفقات فوراً...")
-    
-    previous_price = None
-    
+def calculate_rsi(data, window=14):
+    delta = data['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def check_signals_loop():
+    print("بدء مراقبة الأسواق في الخلفية...")
     while True:
-        try:
-            # جلب السعر الحي للبيتكوين من منصة Binance العالمية
-            api_url = "https://binance.com"
-            response = requests.get(api_url).json()
-            current_price = float(response['price'])
-            print(f"Checking Price: {current_price}")
-            
-            if previous_price is not None and current_price != previous_price:
-                # إشارة صعود لحظية
-                if current_price > previous_price:
-                    msg = f"📈 **إشارة شراء لحظية**\n• الزوج: BTC/USDT\n• السعر الحركي: ${current_price:,}"
-                    send_telegram_message(msg)
-                # إشارة هبوط لحظية
-                elif current_price < previous_price:
-                    msg = f"📉 **إشارة بيع لحظية**\n• الزوج: BTC/USDT\n• السعر الحركي: ${current_price:,}"
-                    send_telegram_message(msg)
-            
-            previous_price = current_price
+        for ticker, name in ASSETS.items():
+            try:
+                df = yf.download(tickers=ticker, period="5d", interval="1h", progress=False)
+                if df.empty: continue
+                df['RSI'] = calculate_rsi(df)
+                
+                current_price = round(df['Close'].iloc[-1], 2)
+                current_rsi = round(df['RSI'].iloc[-1], 2)
+                
+                recommendation = None
+                if current_rsi < 30:
+                    recommendation = "🟢 **توصية شـراء (BUY)** 🟢"
+                elif current_rsi > 70:
+                    recommendation = "🔴 **توصية بـيـع (SELL)** 🔴"
                     
-        except Exception as e:
-            print(f"Error in trading loop: {e}")
-            
-        time.sleep(10) # فحص وتحليل كل 10 ثوانٍ
+                if recommendation:
+                    msg = f"{recommendation}\n\n📊 **الأصل**: {name}\n💵 **السعر**: {current_price}\n📈 RSI = {current_rsi}"
+                    send_telegram_message(msg)
+            except Exception as e:
+                print(f"خطأ في {name}: {e}")
+        time.sleep(900) # فحص كل 15 دقيقة
 
-# إطلاق عقل البوت
-trading_strategy_loop()
+if __name__ == "__main__":
+    # تشغيل فحص التوصيات في الخلفية واصل دون انقطاع
+    t = threading.Thread(target=check_signals_loop)
+    t.daemon = True
+    t.start()
+    
+    # تشغيل خادم الويب الرئيسي لـ Render
+    run_web_server()
